@@ -20,7 +20,7 @@ import sys
 os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
 from huggingface_hub import HfApi, hf_hub_download  # noqa: E402
 
-DEST = os.environ.get("PAI_MODELS", "/workspace/models")
+DEST = os.environ.get("PAI_MODELS", "/runpod-volume/models" if os.path.isdir("/runpod-volume") else "/workspace/models")
 
 # (repo, carpeta destino, patrones en orden de preferencia: se toma el PRIMERO que exista)
 PLAN = [
@@ -50,6 +50,51 @@ def pick(files, patterns):
     return None
 
 
+def read_listing(token):
+    api = HfApi(token=token)
+    listing = {}
+    for repo in sorted({r for r, _, _ in PLAN}):
+        try:
+            infos = api.list_repo_tree(repo, recursive=True, expand=True)
+            listing[repo] = {i.path: getattr(i, "size", 0) or 0 for i in infos if hasattr(i, "size")}
+        except Exception as e:  # gated repo without accepted license, typo, etc.
+            raise RuntimeError(f"No pude leer {repo}: {e}. ¿Aceptaste su licencia en Hugging Face con esta cuenta?")
+    return listing
+
+
+def make_plan(listing):
+    plan, missing = [], []
+    for repo, folder, patterns in PLAN:
+        f = pick(listing[repo], patterns)
+        if not f:
+            missing.append(f"{repo}: {patterns}")
+            continue
+        plan.append({"repo": repo, "folder": folder, "file": f, "gb": round(listing[repo][f] / 1e9, 2), "size": listing[repo][f]})
+    return plan, missing
+
+
+def free_bytes():
+    probe = DEST if os.path.exists(DEST) else os.path.dirname(DEST)
+    return shutil.disk_usage(probe).free
+
+
+def download(plan, token, log=print):
+    done = []
+    for item in plan:
+        target = os.path.join(DEST, item["folder"], os.path.basename(item["file"]))
+        if os.path.exists(target) and os.path.getsize(target) == item["size"]:
+            log(f"ya existe {target}")
+            done.append(target)
+            continue
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        log(f"descargando {item['file']} ({item['gb']} GB) ...")
+        path = hf_hub_download(item["repo"], item["file"], token=token, local_dir=os.path.join(DEST, ".hf", item["repo"].replace("/", "__")))
+        shutil.move(path, target)
+        done.append(target)
+    shutil.rmtree(os.path.join(DEST, ".hf"), ignore_errors=True)
+    return done
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--listar", action="store_true", help="solo lista los archivos de cada repo")
@@ -58,14 +103,10 @@ def main():
     token = os.environ.get("HF_TOKEN")
     if not token:
         sys.exit("Falta HF_TOKEN (export HF_TOKEN=...).")
-    api = HfApi(token=token)
-    listing = {}
-    for repo in sorted({r for r, _, _ in PLAN}):
-        try:
-            infos = api.list_repo_tree(repo, recursive=True, expand=True)
-            listing[repo] = {i.path: getattr(i, "size", 0) or 0 for i in infos if hasattr(i, "size")}
-        except Exception as e:  # gated repo without accepted license, typo, etc.
-            sys.exit(f"No pude leer {repo}: {e}\n¿Aceptaste su licencia en Hugging Face con esta cuenta?")
+    try:
+        listing = read_listing(token)
+    except RuntimeError as e:
+        sys.exit(str(e))
     if args.listar:
         for repo, files in listing.items():
             print(f"\n== {repo}")
@@ -73,32 +114,18 @@ def main():
                 if path.endswith((".safetensors", ".gguf")):
                     print(f"  {size / 1e9:7.2f} GB  {path}")
         return
-    plan, total = [], 0
-    for repo, folder, patterns in PLAN:
-        f = pick(listing[repo], patterns)
-        if not f:
-            print(f"!! Sin coincidencia en {repo} para {patterns}")
-            continue
-        size = listing[repo][f]
-        total += size
-        plan.append((repo, folder, f, size))
-        print(f"{size / 1e9:7.2f} GB  {repo}/{f}  ->  models/{folder}/")
-    free = shutil.disk_usage(os.path.dirname(DEST) if not os.path.exists(DEST) else DEST).free
-    print(f"\nTotal: {total / 1e9:.1f} GB · libre en el disco: {free / 1e9:.1f} GB")
+    plan, missing = make_plan(listing)
+    for m in missing:
+        print("!! Sin coincidencia:", m)
+    for it in plan:
+        print(f"{it['gb']:7.2f} GB  {it['repo']}/{it['file']}  ->  models/{it['folder']}/")
+    total = sum(i["size"] for i in plan)
+    print(f"\nTotal: {total / 1e9:.1f} GB · libre en el disco: {free_bytes() / 1e9:.1f} GB")
     if args.simular:
         return
-    if total > free:
+    if total > free_bytes():
         sys.exit("No cabe. Agranda el disco en RunPod (Storage → pai-video → Expand) y vuelve a correr.")
-    for repo, folder, f, size in plan:
-        target = os.path.join(DEST, folder, os.path.basename(f))
-        if os.path.exists(target) and os.path.getsize(target) == size:
-            print(f"ya existe {target}")
-            continue
-        os.makedirs(os.path.dirname(target), exist_ok=True)
-        print(f"descargando {f} ...", flush=True)
-        path = hf_hub_download(repo, f, token=token, local_dir=os.path.join(DEST, ".hf", repo.replace("/", "__")))
-        shutil.move(path, target)
-    shutil.rmtree(os.path.join(DEST, ".hf"), ignore_errors=True)
+    download(plan, token)
     print("\nListo. Modelos en", DEST)
 
 

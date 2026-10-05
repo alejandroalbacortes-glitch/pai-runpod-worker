@@ -13,7 +13,7 @@ RUN set -eux; cd /comfyui/custom_nodes; \
     clone PlagueKind/ComfyUI-PlagueKind-Nodes ComfyUI-PlagueKind-Nodes   aaec055; \
     clone obvpm/comfyui-obvpm                 comfyui-obvpm              704fe3e; \
     for r in */requirements.txt; do uv pip install -r "$r"; done; \
-    uv pip install "transformers>=4.50.3,<5" "huggingface-hub<1.0"
+    uv pip install "transformers>=4.50.3,<5" "huggingface-hub<1.0" hf_transfer
 
 # Rutas de modelos en el disco de red (incluye diffusion_models, text_encoders, etc.).
 COPY extra_model_paths.yaml /comfyui/extra_model_paths.yaml
@@ -25,3 +25,4 @@ RUN cd /comfyui && timeout 300 python main.py --quick-test-for-ci --cpu
 # Handler de PAI: envuelve el oficial para videos grandes (entrada/salida por el disco).
 RUN mv /handler.py /handler_base.py
 COPY pai_handler.py /handler.py
+COPY scripts/descargar_modelos.py /pai/descargar_modelos.py

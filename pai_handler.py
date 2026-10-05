@@ -13,6 +13,7 @@ Everything else is the official handler unchanged.
 import base64
 import os
 import shutil
+import sys
 import time
 
 import runpod
@@ -46,8 +47,86 @@ def _cleanup(folder):
             pass
 
 
+def _models_on_disk():
+    root = os.path.join(VOLUME, "models")
+    out = {}
+    for folder in sorted(os.listdir(root)) if os.path.isdir(root) else []:
+        p = os.path.join(root, folder)
+        if os.path.isdir(p):
+            files = [f for f in os.listdir(p) if not f.startswith(".")]
+            if files:
+                out[folder] = {f: round(os.path.getsize(os.path.join(p, f)) / 1e9, 2) for f in sorted(files)}
+    return out
+
+
+def maintenance(job, action):
+    """Admin jobs: ping, listar (plan without downloading) and descargar (fetch models).
+
+    The Hugging Face token comes from the endpoint's HF_TOKEN environment variable,
+    never from the request, so it does not show up in job history.
+    """
+    usage = shutil.disk_usage(VOLUME) if os.path.isdir(VOLUME) else None
+    info = {
+        "gpu": os.environ.get("RUNPOD_GPU_NAME") or _gpu_name(),
+        "volume_free_gb": round(usage.free / 1e9, 1) if usage else None,
+        "volume_total_gb": round(usage.total / 1e9, 1) if usage else None,
+        "models": _models_on_disk(),
+    }
+    if action == "ping":
+        return info
+    sys.path.insert(0, "/pai")
+    import descargar_modelos as dm  # noqa: WPS433 (only needed for admin jobs)
+
+    token = os.environ.get("HF_TOKEN")
+    if not token:
+        return {"error": "Falta la variable HF_TOKEN en el endpoint (Manage → Edit → Environment variables)."}
+    try:
+        listing = dm.read_listing(token)
+    except RuntimeError as e:
+        return {"error": str(e)}
+    plan, missing = dm.make_plan(listing)
+    total = sum(i["size"] for i in plan)
+    info.update({
+        "plan": [{k: i[k] for k in ("repo", "file", "folder", "gb")} for i in plan],
+        "missing": missing,
+        "plan_total_gb": round(total / 1e9, 1),
+    })
+    if action == "listar":
+        info["all_files"] = {
+            repo: {p: round(s / 1e9, 2) for p, s in files.items() if p.endswith((".safetensors", ".gguf"))}
+            for repo, files in listing.items()
+        }
+        return info
+    if action == "descargar":
+        if usage and total > usage.free:
+            # Partially downloaded files are skipped on the next run, so only the rest counts.
+            pending = sum(i["size"] for i in plan if not os.path.exists(os.path.join(dm.DEST, i["folder"], os.path.basename(i["file"]))))
+            if pending > usage.free:
+                return {**info, "error": f"No cabe: faltan {pending / 1e9:.1f} GB y hay {usage.free / 1e9:.1f} GB libres. Agranda el disco."}
+        log = lambda msg: runpod.serverless.progress_update(job, msg)  # noqa: E731
+        try:
+            dm.download(plan, token, log=log)
+        except Exception as e:  # network hiccup: running the job again resumes
+            return {**info, "error": f"Descarga interrumpida ({e}). Vuelve a mandar 'descargar' y continúa donde se quedó."}
+        info["models"] = _models_on_disk()
+        info["status"] = "listo"
+        return info
+    return {"error": f"Acción desconocida: {action}"}
+
+
+def _gpu_name():
+    try:
+        import subprocess
+        return subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"], capture_output=True, text=True, timeout=10).stdout.strip()
+    except Exception:
+        return None
+
+
 def handler(job):
     job_input = job.get("input") or {}
+    action = job_input.get("pai_action")
+    if action:
+        return maintenance(job, action)
     for folder in ("pai/in", "pai/out"):
         _cleanup(os.path.join(VOLUME, folder))
 
