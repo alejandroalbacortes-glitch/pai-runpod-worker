@@ -102,7 +102,8 @@ def maintenance(job, action):
     # Optional extra files without rebuilding: [{"repo","file","folder"}]
     extra = [e for e in (job.get("input") or {}).get("extra_files") or []
              if isinstance(e, dict) and all(isinstance(e.get(k), str) for k in ("repo", "file", "folder"))
-             and e["folder"].replace("_", "").isalnum() and ".." not in e["file"]]
+             and e["folder"].replace("_", "").isalnum() and ".." not in e["file"]
+             and e.get("convert") in (None, "prefix")]
     try:
         listing = dm.read_listing(token, [e["repo"] for e in extra])
     except RuntimeError as e:
@@ -123,7 +124,7 @@ def maintenance(job, action):
     if action == "descargar":
         if usage and total > usage.free:
             # Partially downloaded files are skipped on the next run, so only the rest counts.
-            pending = sum(i["size"] for i in plan if not os.path.exists(os.path.join(dm.DEST, i["folder"], os.path.basename(i["file"]))))
+            pending = sum(i["size"] for i in plan if not os.path.exists(dm.target_path(i)))
             if pending > usage.free:
                 return {**info, "error": f"No cabe: faltan {pending / 1e9:.1f} GB y hay {usage.free / 1e9:.1f} GB libres. Agranda el disco."}
         log = lambda msg: runpod.serverless.progress_update(job, msg)  # noqa: E731

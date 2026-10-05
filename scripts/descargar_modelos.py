@@ -81,8 +81,8 @@ def read_listing(token, extra_repos=None):
 
 def make_plan(listing, extra=None):
     plan, missing = [], []
-    entries = list(PLAN) + [(e["repo"], e["folder"], [e["file"]]) for e in (extra or [])]
-    for repo, folder, patterns in entries:
+    entries = [(r, f, p, None) for r, f, p in PLAN] + [(e["repo"], e["folder"], [e["file"]], e.get("convert")) for e in (extra or [])]
+    for repo, folder, patterns, convert in entries:
         if repo not in listing:
             missing.append(f"{repo}: {UNREADABLE.get(repo, 'repo no leído')}")
             continue
@@ -90,7 +90,7 @@ def make_plan(listing, extra=None):
         if not f:
             missing.append(f"{repo}: {patterns}")
             continue
-        plan.append({"repo": repo, "folder": folder, "file": f, "gb": round(listing[repo][f] / 1e9, 2), "size": listing[repo][f]})
+        plan.append({"repo": repo, "folder": folder, "file": f, "gb": round(listing[repo][f] / 1e9, 2), "size": listing[repo][f], "convert": convert})
     return plan, missing
 
 
@@ -99,12 +99,43 @@ def free_bytes():
     return shutil.disk_usage(probe).free
 
 
+def target_path(item):
+    name = os.path.basename(item["file"])
+    if item.get("convert") == "prefix":  # converted copy keeps a recognisable name
+        name = name[: -len(".safetensors")] + "_comfyui.safetensors"
+    return os.path.join(DEST, item["folder"], name)
+
+
+def add_diffusion_prefix(src, dst):
+    """Rewrites LoRA keys to ComfyUI's `diffusion_model.` layout. Tensor bytes are copied unchanged."""
+    import json
+    import struct
+    with open(src, "rb") as f:
+        n = struct.unpack("<Q", f.read(8))[0]
+        header = json.loads(f.read(n))
+        new = {}
+        for k, v in header.items():
+            if k == "__metadata__" or k.startswith("diffusion_model."):
+                new[k] = v
+            else:
+                new["diffusion_model." + k] = v
+        blob = json.dumps(new, separators=(",", ":")).encode()
+        blob += b" " * (-len(blob) % 8)
+        tmp = dst + ".part"
+        with open(tmp, "wb") as out:
+            out.write(struct.pack("<Q", len(blob)))
+            out.write(blob)
+            shutil.copyfileobj(f, out, 64 * 1024 * 1024)
+    os.replace(tmp, dst)
+
+
 def download(plan, token, log=print):
     """Downloads what it can; a file that fails (license not accepted, network) is reported and skipped."""
     done, failed = [], []
     for item in plan:
-        target = os.path.join(DEST, item["folder"], os.path.basename(item["file"]))
-        if os.path.exists(target) and os.path.getsize(target) == item["size"]:
+        target = target_path(item)
+        converted = item.get("convert") == "prefix"
+        if os.path.exists(target) and (converted or os.path.getsize(target) == item["size"]):
             log(f"ya existe {target}")
             done.append(target)
             continue
@@ -112,7 +143,12 @@ def download(plan, token, log=print):
         log(f"descargando {item['file']} ({item['gb']} GB) ...")
         try:
             path = hf_hub_download(item["repo"], item["file"], token=token, local_dir=os.path.join(DEST, ".hf", item["repo"].replace("/", "__")))
-            shutil.move(path, target)
+            if converted:
+                log(f"convirtiendo {os.path.basename(target)} para ComfyUI ...")
+                add_diffusion_prefix(path, target)
+                os.remove(path)
+            else:
+                shutil.move(path, target)
             done.append(target)
         except Exception as e:  # noqa: BLE001
             reason = str(e).splitlines()[0][:160]
