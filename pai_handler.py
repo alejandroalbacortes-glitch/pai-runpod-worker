@@ -109,11 +109,12 @@ def maintenance(job, action):
                 return {**info, "error": f"No cabe: faltan {pending / 1e9:.1f} GB y hay {usage.free / 1e9:.1f} GB libres. Agranda el disco."}
         log = lambda msg: runpod.serverless.progress_update(job, msg)  # noqa: E731
         try:
-            dm.download(plan, token, log=log)
+            _, failed = dm.download(plan, token, log=log)
         except Exception as e:  # network hiccup: running the job again resumes
             return {**info, "error": f"Descarga interrumpida ({e}). Vuelve a mandar 'descargar' y continúa donde se quedó."}
         info["models"] = _models_on_disk()
-        info["status"] = "listo"
+        info["failed"] = failed
+        info["status"] = "listo" if not failed and not missing else "incompleto"
         return info
     return {"error": f"Acción desconocida: {action}"}
 

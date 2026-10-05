@@ -38,6 +38,15 @@ PLAN = [
     ("Comfy-Org/MiniMax-H3", "vae", ["vae/minimax_h3_audio_vae_fp32.safetensors"]),
     ("Comfy-Org/MiniMax-H3", "loras", ["loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors"]),
     ("Comfy-Org/MiniMax-H3", "loras", ["loras/minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors"]),
+    # VFX: IC-LoRAs de LTX-2.5 (cada repo pide aceptar su licencia en Hugging Face) · ~9 GB
+    ("Lightricks/LTX-2.5-22b-IC-LoRA-Restore", "loras", ["ltx-2.5-22b-ic-lora-restore-1.0.safetensors"]),
+    ("Lightricks/LTX-2.5-22b-IC-LoRA-Refine-Details", "loras", ["ltx-2.5-22b-ic-lora-refine-details-1.0.safetensors"]),
+    ("Lightricks/LTX-2.5-22b-IC-LoRA-Alpha-Gen", "loras", ["ltx-2.5-22b-ic-lora-alpha-gen-0.9.safetensors"]),
+    ("Lightricks/LTX-2.5-22b-IC-LoRA-Clean-Plate", "loras", ["ltx-2.5-22b-ic-lora-clean-plate-1.0.safetensors"]),
+    ("Lightricks/LTX-2.3-22b-IC-LoRA-Deblur", "loras", ["ltx-2.3-22b-ic-lora-deblur-0.9.safetensors"]),
+    ("Lightricks/LTX-2.5-22b-IC-LoRA-Decompression", "loras", ["ltx-2.5-22b-ic-lora-decompression-0.9.safetensors"]),
+    ("Lightricks/LTX-2.5-22b-IC-LoRA-Colorization", "loras", ["ltx-2.5-22b-ic-lora-colorization-0.9.safetensors"]),
+    ("Lightricks/LTX-2.3-22b-IC-LoRA-In-Outpainting", "loras", ["ltx-2.3-22b-ic-lora-in-outpainting-0.9.safetensors"]),
 ]
 
 
@@ -51,15 +60,22 @@ def pick(files, patterns):
     return None
 
 
+UNREADABLE = {}  # repo -> reason (gated repo without accepted license, typo, ...)
+
+
 def read_listing(token, extra_repos=None):
+    """Lists every repo; one unreadable repo no longer blocks the others."""
     api = HfApi(token=token)
     listing = {}
+    UNREADABLE.clear()
     for repo in sorted({r for r, _, _ in PLAN} | set(extra_repos or [])):
         try:
             infos = api.list_repo_tree(repo, recursive=True, expand=True)
             listing[repo] = {i.path: getattr(i, "size", 0) or 0 for i in infos if hasattr(i, "size")}
-        except Exception as e:  # gated repo without accepted license, typo, etc.
-            raise RuntimeError(f"No pude leer {repo}: {e}. ¿Aceptaste su licencia en Hugging Face con esta cuenta?")
+        except Exception as e:  # noqa: BLE001
+            UNREADABLE[repo] = f"{type(e).__name__}: acepta su licencia en huggingface.co/{repo} con tu cuenta"
+    if not listing:
+        raise RuntimeError("No pude leer ningún repo de Hugging Face. Revisa HF_TOKEN. " + "; ".join(f"{r} ({m})" for r, m in UNREADABLE.items()))
     return listing
 
 
@@ -68,7 +84,7 @@ def make_plan(listing, extra=None):
     entries = list(PLAN) + [(e["repo"], e["folder"], [e["file"]]) for e in (extra or [])]
     for repo, folder, patterns in entries:
         if repo not in listing:
-            missing.append(f"{repo}: repo no leído")
+            missing.append(f"{repo}: {UNREADABLE.get(repo, 'repo no leído')}")
             continue
         f = pick(listing[repo], patterns)
         if not f:
@@ -84,7 +100,8 @@ def free_bytes():
 
 
 def download(plan, token, log=print):
-    done = []
+    """Downloads what it can; a file that fails (license not accepted, network) is reported and skipped."""
+    done, failed = [], []
     for item in plan:
         target = os.path.join(DEST, item["folder"], os.path.basename(item["file"]))
         if os.path.exists(target) and os.path.getsize(target) == item["size"]:
@@ -93,11 +110,18 @@ def download(plan, token, log=print):
             continue
         os.makedirs(os.path.dirname(target), exist_ok=True)
         log(f"descargando {item['file']} ({item['gb']} GB) ...")
-        path = hf_hub_download(item["repo"], item["file"], token=token, local_dir=os.path.join(DEST, ".hf", item["repo"].replace("/", "__")))
-        shutil.move(path, target)
-        done.append(target)
+        try:
+            path = hf_hub_download(item["repo"], item["file"], token=token, local_dir=os.path.join(DEST, ".hf", item["repo"].replace("/", "__")))
+            shutil.move(path, target)
+            done.append(target)
+        except Exception as e:  # noqa: BLE001
+            reason = str(e).splitlines()[0][:160]
+            if "401" in reason or "403" in reason or "gated" in reason.lower():
+                reason = f"acepta la licencia en huggingface.co/{item['repo']}"
+            failed.append({"file": item["file"], "repo": item["repo"], "error": reason})
+            log(f"falló {item['file']}: {reason}")
     shutil.rmtree(os.path.join(DEST, ".hf"), ignore_errors=True)
-    return done
+    return done, failed
 
 
 def main():
@@ -130,7 +154,9 @@ def main():
         return
     if total > free_bytes():
         sys.exit("No cabe. Agranda el disco en RunPod (Storage → pai-video → Expand) y vuelve a correr.")
-    download(plan, token)
+    _, failed = download(plan, token)
+    for f in failed:
+        print("!! Falló", f["file"], "-", f["error"])
     print("\nListo. Modelos en", DEST)
 
 

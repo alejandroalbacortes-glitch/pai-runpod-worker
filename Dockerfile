@@ -4,7 +4,10 @@
 # viven en el disco de red (/runpod-volume/models).
 FROM runpod/worker-comfyui:5.10.0-base
 
-# Nodos extra que usan tus flujos de H3, fijados a las versiones que probaste en la Mac.
+# Nodos extra: los de tus flujos de H3 (probados en la Mac) y los de VFX de LTX-2.5
+# (IC-LoRA, tiled fusion, inpaint/outpaint), fijados a una versión concreta.
+# De ComfyUI-LTXVideo se instalan sus dependencias sin diffusers: no lo usa y choca
+# con huggingface-hub<1.0, que necesita el script de descarga.
 RUN set -eux; cd /comfyui/custom_nodes; \
     clone() { git clone --quiet "https://github.com/$1.git" "$2" && git -C "$2" checkout --quiet "$3"; }; \
     clone city96/ComfyUI-GGUF                 ComfyUI-GGUF               6ea2651; \
@@ -12,7 +15,10 @@ RUN set -eux; cd /comfyui/custom_nodes; \
     clone NikoDemon80/ComfyUI-H3-Motion-Context ComfyUI-H3-Motion-Context 5335715; \
     clone PlagueKind/ComfyUI-PlagueKind-Nodes ComfyUI-PlagueKind-Nodes   aaec055; \
     clone obvpm/comfyui-obvpm                 comfyui-obvpm              704fe3e; \
-    for r in */requirements.txt; do uv pip install -r "$r"; done; \
+    clone Lightricks/ComfyUI-LTXVideo         ComfyUI-LTXVideo           3bf3ca6; \
+    clone kijai/ComfyUI-KJNodes               ComfyUI-KJNodes            d3cfe21; \
+    for r in */requirements.txt; do case "$r" in ComfyUI-LTXVideo/*) ;; *) uv pip install -r "$r";; esac; done; \
+    uv pip install "colour-science>=0.4.4" einops kornia openimageio "ninja~=1.11.1.4" timm; \
     uv pip install "transformers>=4.50.3,<5" "huggingface-hub<1.0" hf_transfer
 
 # Rutas de modelos en el disco de red (incluye diffusion_models, text_encoders, etc.).
