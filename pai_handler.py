@@ -59,6 +59,24 @@ def _models_on_disk():
     return out
 
 
+VFX_NODES = ("LTXAddVideoICLoRAGuide", "LTXICLoRALoaderModelOnly", "LTXVTiledFusionSampler", "ImagePadForOutpaintTargetSize", "MiniMaxH3ImageToVideo")
+
+
+def _nodes():
+    """Which key nodes ComfyUI loaded (missing ones point to an import failure in the image)."""
+    import json
+    import urllib.request
+    host = os.environ.get("COMFY_HOST", "127.0.0.1:8188")
+    out = {}
+    for name in VFX_NODES:
+        try:
+            with urllib.request.urlopen(f"http://{host}/object_info/{name}", timeout=10) as r:
+                out[name] = bool(json.loads(r.read() or b"{}"))
+        except Exception:  # noqa: BLE001
+            out[name] = None
+    return out
+
+
 def maintenance(job, action):
     """Admin jobs: ping, listar (plan without downloading) and descargar (fetch models).
 
@@ -73,6 +91,7 @@ def maintenance(job, action):
         "models": _models_on_disk(),
     }
     if action == "ping":
+        info["nodes"] = _nodes()
         return info
     sys.path.insert(0, "/pai")
     import descargar_modelos as dm  # noqa: WPS433 (only needed for admin jobs)
