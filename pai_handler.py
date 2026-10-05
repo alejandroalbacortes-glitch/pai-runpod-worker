@@ -80,11 +80,15 @@ def maintenance(job, action):
     token = os.environ.get("HF_TOKEN")
     if not token:
         return {"error": "Falta la variable HF_TOKEN en el endpoint (Manage → Edit → Environment variables)."}
+    # Optional extra files without rebuilding: [{"repo","file","folder"}]
+    extra = [e for e in (job.get("input") or {}).get("extra_files") or []
+             if isinstance(e, dict) and all(isinstance(e.get(k), str) for k in ("repo", "file", "folder"))
+             and e["folder"].replace("_", "").isalnum() and ".." not in e["file"]]
     try:
-        listing = dm.read_listing(token)
+        listing = dm.read_listing(token, [e["repo"] for e in extra])
     except RuntimeError as e:
         return {"error": str(e)}
-    plan, missing = dm.make_plan(listing)
+    plan, missing = dm.make_plan(listing, extra)
     total = sum(i["size"] for i in plan)
     info.update({
         "plan": [{k: i[k] for k in ("repo", "file", "folder", "gb")} for i in plan],
